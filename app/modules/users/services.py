@@ -4,10 +4,14 @@ Lógica de negocio para gestión de usuarios y roles
 """
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
+
 from fastapi import HTTPException, status
 from typing import List, Optional
 from app.modules.users.models import Usuario, Rol
 from app.modules.users.schemas import UsuarioCreate, UsuarioUpdate, RolCreate, RolUpdate
+from app.modules.users.schemas import UsuarioResponse
+
 from app.core.security import get_password_hash
 from datetime import datetime
 
@@ -129,11 +133,15 @@ def get_usuarios(
     rol_id: Optional[int] = None,
     area: Optional[str] = None,
     estado: Optional[str] = None
-) -> List[Usuario]:
+) -> List[UsuarioResponse]:
     """
     Obtiene lista de usuarios con filtros opcionales
+    e incluye el nombre completo del manager.
     """
-    query = db.query(Usuario)
+    
+    query = db.query(Usuario).options(
+        joinedload(Usuario.manager)  # ⭐ carga el manager en la misma consulta
+    )
     
     if rol_id:
         query = query.filter(Usuario.id_rol == rol_id)
@@ -142,7 +150,23 @@ def get_usuarios(
     if estado:
         query = query.filter(Usuario.estado == estado)
     
-    return query.offset(skip).limit(limit).all()
+    usuarios = query.offset(skip).limit(limit).all()
+
+    # ⭐ Construimos la respuesta incluyendo manager_nombre
+    usuarios_out = []
+    for u in usuarios:
+        manager_nombre = None
+        if u.manager:
+            manager_nombre = f"{u.manager.nombre} {u.manager.apellido}"
+
+        usuarios_out.append(
+            UsuarioResponse(
+                **u.__dict__,
+                manager_nombre=manager_nombre
+            )
+        )
+
+    return usuarios_out
 
 
 def create_usuario(db: Session, usuario: UsuarioCreate, creado_por_id: int) -> Usuario:

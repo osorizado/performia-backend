@@ -509,22 +509,27 @@ def generar_pdf(datos: dict, ruta_archivo: str, config: dict):
         top_data = [['#', 'COLABORADOR', 'ÁREA', 'CARGO', 'PROMEDIO', 'EVAL.']]
         
         for idx, performer in enumerate(datos["top_performers"][:10], 1):
+            # Convertir TopPerformer a dict si es un objeto Pydantic
+            if hasattr(performer, 'model_dump'):
+                p = performer.model_dump()
+            else:
+                p = performer
+            
             medalla = '🥇' if idx == 1 else '🥈' if idx == 2 else '🥉' if idx == 3 else str(idx)
-            promedio = performer['promedio']
+            promedio = p['promedio']
             promedio_icon = '⭐⭐⭐⭐⭐' if promedio >= 4.8 else '⭐⭐⭐⭐' if promedio >= 4.0 else '⭐⭐⭐'
             
             top_data.append([
                 medalla,
-                f"{performer['nombre']} {performer['apellido']}",
-                performer['area'] or 'N/A',
-                performer['cargo'] or 'N/A',
+                f"{p['nombre']} {p['apellido']}",
+                p['area'] or 'N/A',
+                p['cargo'] or 'N/A',
                 f"{promedio:.2f}\n{promedio_icon}",
-                str(performer['cant_evaluaciones'])
+                str(p['evaluaciones_completas'])
             ])
         
         top_table = Table(top_data, colWidths=[0.4*inch, 2*inch, 1.2*inch, 1.2*inch, 1*inch, 0.6*inch])
-        top_table.setStyle(TableStyle([
-            # Header
+        top_style = [
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2d3748')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
@@ -532,8 +537,7 @@ def generar_pdf(datos: dict, ruta_archivo: str, config: dict):
             ('FONTSIZE', (0, 0), (-1, 0), 10),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
             ('TOPPADDING', (0, 0), (-1, 0), 12),
-            
-            # Cuerpo
+
             ('ALIGN', (0, 1), (0, -1), 'CENTER'),
             ('ALIGN', (1, 1), (1, -1), 'LEFT'),
             ('ALIGN', (2, 1), (-1, -1), 'CENTER'),
@@ -542,21 +546,27 @@ def generar_pdf(datos: dict, ruta_archivo: str, config: dict):
             ('TOPPADDING', (0, 1), (-1, -1), 8),
             ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
             ('LEFTPADDING', (1, 1), (1, -1), 10),
-            
-            # Top 3 destacado
-            ('BACKGROUND', (0, 1), (-1, 1), colors.HexColor('#fef3c7')),
-            ('BACKGROUND', (0, 2), (-1, 2), colors.HexColor('#f3f4f6')),
-            ('BACKGROUND', (0, 3), (-1, 3), colors.HexColor('#fde8e8')),
-            
-            # Resto alternado
-            ('ROWBACKGROUNDS', (0, 4), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')]),
-            
-            # Bordes
+
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e0')),
             ('LINEBELOW', (0, 0), (-1, 0), 2, colors.HexColor('#48bb78')),
-        ]))
+        ]
+
+        # aplicar decoraciones de top 1-3 solo si existen
+        num_rows = len(top_data)
+
+        if num_rows > 1:
+            top_style.append(('BACKGROUND', (0, 1), (-1, 1), colors.HexColor('#fef3c7')))
+        if num_rows > 2:
+            top_style.append(('BACKGROUND', (0, 2), (-1, 2), colors.HexColor('#f3f4f6')))
+        if num_rows > 3:
+            top_style.append(('BACKGROUND', (0, 3), (-1, 3), colors.HexColor('#fde8e8')))
+        if num_rows > 4:
+            top_style.append(('ROWBACKGROUNDS', (0, 4), (-1, -1),
+                              [colors.white, colors.HexColor('#f8f9fa')]))
+        
+        top_table.setStyle(TableStyle(top_style))
         story.append(top_table)
-        story.append(Spacer(1, 0.3*inch))
+        story.append(Spacer(1, 0.4*inch))
     
     # COMPETENCIAS (Nueva página)
     if datos.get("estadisticas_competencias"):
@@ -574,8 +584,7 @@ def generar_pdf(datos: dict, ruta_archivo: str, config: dict):
             ])
         
         comp_table = Table(comp_data, colWidths=[2.5*inch, 1.2*inch, 1.2*inch, 1.2*inch])
-        comp_table.setStyle(TableStyle([
-            # Header
+        comp_style = [
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2d3748')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
@@ -583,8 +592,7 @@ def generar_pdf(datos: dict, ruta_archivo: str, config: dict):
             ('FONTSIZE', (0, 0), (-1, 0), 10),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
             ('TOPPADDING', (0, 0), (-1, 0), 12),
-            
-            # Cuerpo
+
             ('ALIGN', (0, 1), (0, -1), 'LEFT'),
             ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
             ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
@@ -592,12 +600,19 @@ def generar_pdf(datos: dict, ruta_archivo: str, config: dict):
             ('TOPPADDING', (0, 1), (-1, -1), 10),
             ('BOTTOMPADDING', (0, 1), (-1, -1), 10),
             ('LEFTPADDING', (0, 1), (0, -1), 15),
-            
-            # Bordes y colores
+
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e0')),
             ('LINEBELOW', (0, 0), (-1, 0), 2, colors.HexColor('#ed8936')),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')])
-        ]))
+        ]
+
+        num_rows = len(comp_data)
+        if num_rows > 1:
+            comp_style.append(
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+                 [colors.white, colors.HexColor('#f8f9fa')])
+            )
+
+        comp_table.setStyle(TableStyle(comp_style))
         story.append(comp_table)
     
     # Footer
@@ -738,6 +753,12 @@ def generar_excel(datos: dict, ruta_archivo: str, config: dict):
         
         # Datos
         for idx, performer in enumerate(datos["top_performers"][:10], start=4):
+            # Convertir TopPerformer a dict si es un objeto Pydantic
+            if hasattr(performer, 'model_dump'):
+                p = performer.model_dump()
+            else:
+                p = performer
+            
             rank = idx - 3
             
             # Color especial para top 3
@@ -752,12 +773,12 @@ def generar_excel(datos: dict, ruta_archivo: str, config: dict):
             
             cells_data = [
                 (rank, 'center'),
-                (performer['nombre'], 'left'),
-                (performer['apellido'], 'left'),
-                (performer['area'] or 'N/A', 'center'),
-                (performer['cargo'] or 'N/A', 'center'),
-                (round(performer['promedio'], 2), 'center'),
-                (performer['cant_evaluaciones'], 'center')
+                (p['nombre'], 'left'),
+                (p['apellido'], 'left'),
+                (p['area'] or 'N/A', 'center'),
+                (p['cargo'] or 'N/A', 'center'),
+                (round(p['promedio'], 2), 'center'),
+                (p['evaluaciones_completas'], 'center')
             ]
             
             for col_idx, (value, align) in enumerate(cells_data, start=1):

@@ -2,7 +2,7 @@
 Rutas de evaluaciones y resultados
 Endpoints CRUD para gestión de evaluaciones
 """
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.core.database import get_db
@@ -11,7 +11,8 @@ from app.modules.users.models import Usuario
 from app.modules.evaluaciones.schemas import (
     EvaluacionResponse, EvaluacionResumen,
     IniciarEvaluacionRequest, ResponderEvaluacionRequest,
-    ResultadoResponse, ResultadoUpdate
+    ResultadoResponse, ResultadoUpdate,
+    AsignarEvaluacionMasivaRequest  # ⭐ NUEVO
 )
 from app.modules.evaluaciones import services
 
@@ -70,7 +71,27 @@ def mis_evaluaciones(
     Obtiene todas las evaluaciones donde el usuario actual es el evaluado
     """
     return services.get_mis_evaluaciones(db, current_user.id_usuario)
-
+@router.get("/asignadas", response_model=List[EvaluacionResumen])
+def evaluaciones_asignadas(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    estado: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(require_role("Administrador", "RRHH", "Manager", "Director"))
+):
+    """
+    Obtiene las evaluaciones asignadas/creadas por el usuario actual
+    Requiere: Administrador, RRHH, Manager o Director
+    """
+    return services.get_evaluaciones_asignadas(
+        db, 
+        current_user.id_usuario,
+        skip=skip,
+        limit=limit,
+        estado=estado,
+        periodo=periodo
+    )
 
 @router.get("/periodo/{periodo}", response_model=List[EvaluacionResumen])
 def evaluaciones_por_periodo(
@@ -96,24 +117,31 @@ def obtener_evaluacion(
     """
     evaluacion = services.get_evaluacion_by_id(db, evaluacion_id)
     if not evaluacion:
-        from fastapi import HTTPException, status
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Evaluación no encontrada"
         )
     
-    # Verificar permisos: solo el evaluador, evaluado, RRHH, Admin o Director pueden ver
-    if (current_user.id_usuario != evaluacion.id_evaluador and
-        current_user.id_usuario != evaluacion.id_evaluado and
-        current_user.rol.nombre_rol not in ["Administrador", "RRHH", "Director"]):
+    # Verificar si el usuario es manager del evaluado
+    es_manager_del_evaluado = False
+    if evaluacion.evaluado and evaluacion.evaluado.manager_id == current_user.id_usuario:
+        es_manager_del_evaluado = True
+    
+    # Verificar permisos: evaluador, evaluado, manager del evaluado, o roles administrativos
+    tiene_permiso = (
+        current_user.id_usuario == evaluacion.id_evaluador or
+        current_user.id_usuario == evaluacion.id_evaluado or
+        es_manager_del_evaluado or
+        current_user.rol.nombre_rol in ["Administrador", "RRHH", "Director"]
+    )
+    
+    if not tiene_permiso:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permiso para ver esta evaluación"
         )
     
     return evaluacion
-
-
 @router.post("/iniciar", response_model=EvaluacionResponse)
 def iniciar_evaluacion(
     request: IniciarEvaluacionRequest,
@@ -167,7 +195,26 @@ def cancelar_evaluacion(
     """
     return services.cancelar_evaluacion(db, evaluacion_id, motivo)
 
-
+@router.post("/asignar-masiva")
+def asignar_evaluacion_masiva(
+    request: AsignarEvaluacionMasivaRequest,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(require_role("Administrador", "RRHH"))
+):
+    """
+    Asigna un formulario a todos los usuarios de un rol específico
+    Requiere: Administrador o RRHH
+    
+    Body esperado:
+    {
+        "id_formulario": 1,
+        "rol_id": 4,
+        "periodo": "2025",
+        "tipo_evaluacion": "Autoevaluación",
+        "dias_plazo": 21
+    }
+    """
+    return services.asignar_evaluacion_masiva(db, request, current_user.id_usuario)
 # ============================================================================
 # ENDPOINTS DE RESULTADOS
 # ============================================================================
@@ -184,7 +231,6 @@ def listar_resultados(
     # Verificar que la evaluación existe y el usuario tiene permiso
     evaluacion = services.get_evaluacion_by_id(db, evaluacion_id)
     if not evaluacion:
-        from fastapi import HTTPException, status
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Evaluación no encontrada"
@@ -213,3 +259,64 @@ def actualizar_resultado(
     Solo el evaluador puede actualizar antes de completar la evaluación
     """
     return services.update_resultado(db, resultado_id, resultado_update)
+
+# ============================================================================
+# ENDPOINTS ESPECÍFICOS PARA MANAGERS
+# ============================================================================
+
+@router.get("/equipo/todas", response_model=List[EvaluacionResumen])
+def evaluaciones_mi_equipo(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    estado: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None),
+    tipo: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(require_role("Manager", "Director"))
+):
+    """
+    Obtiene TODAS las evaluaciones de los colaboradores directos del manager
+    Incluye:
+    - Evaluaciones donde el manager es el evaluador (debe completar)
+    - Autoevaluaciones de sus colaboradores (solo lectura)
+    
+    Requiere: Manager o Director
+    """
+    return services.get_evaluaciones_equipo(
+        db,
+        current_user.id_usuario,
+        skip=skip,
+        limit=limit,
+        estado=estado,
+        periodo=periodo,
+        tipo=tipo
+    )
+
+
+@router.get("/equipo/pendientes-manager", response_model=List[EvaluacionResumen])
+def evaluaciones_pendientes_manager(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(require_role("Manager", "Director"))
+):
+    """
+    Obtiene SOLO las evaluaciones pendientes que el manager debe completar
+    (donde el manager es el evaluador)
+    
+    Requiere: Manager o Director
+    """
+    return services.get_evaluaciones_pendientes_equipo(db, current_user.id_usuario)
+
+
+@router.get("/equipo/autoevaluaciones", response_model=List[EvaluacionResumen])
+def autoevaluaciones_equipo(
+    estado: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(require_role("Manager", "Director"))
+):
+    """
+    Obtiene las autoevaluaciones de los colaboradores del manager
+    (para monitoreo, sin capacidad de editar)
+    
+    Requiere: Manager o Director
+    """
+    return services.get_autoevaluaciones_equipo(db, current_user.id_usuario, estado)

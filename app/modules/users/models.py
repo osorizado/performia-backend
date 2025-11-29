@@ -54,7 +54,22 @@ class Usuario(Base):
     # RELACIONES
     # ============================================
     rol = relationship("Rol", back_populates="usuarios")
-    manager = relationship("Usuario", remote_side=[id_usuario])
+    # Relación self-referenciada (manager-subordinados)
+    # Relación self-referenciada (manager-subordinados)
+    manager = relationship(
+        "Usuario",
+        remote_side=[id_usuario],
+        back_populates="subordinados",
+        foreign_keys="Usuario.manager_id"
+    )
+
+    subordinados = relationship(
+        "Usuario",
+        back_populates="manager",
+        foreign_keys="Usuario.manager_id"
+    )
+
+
     
     # Evaluaciones
     evaluaciones_como_evaluado = relationship(

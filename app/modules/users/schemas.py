@@ -72,6 +72,8 @@ class UsuarioResponse(UsuarioBase):
     id_usuario: int
     id_rol: int
     manager_id: Optional[int] = None
+    manager_nombre: Optional[str] = None
+
     estado: str
     fecha_creacion: datetime
     fecha_modificacion: datetime

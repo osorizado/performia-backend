@@ -4,8 +4,12 @@ Lógica de negocio para gestión de evaluaciones y resultados
 """
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import joinedload
 from fastapi import HTTPException, status
 from typing import List, Optional
+from datetime import datetime, date, timedelta
+from decimal import Decimal
+
 from app.modules.evaluaciones.models import Evaluacion, Resultado
 from app.modules.evaluaciones.schemas import (
     EvaluacionCreate, EvaluacionUpdate, IniciarEvaluacionRequest, ResponderEvaluacionRequest,
@@ -13,8 +17,6 @@ from app.modules.evaluaciones.schemas import (
 )
 from app.modules.formularios.models import Formulario, Pregunta
 from app.modules.users.models import Usuario
-from datetime import datetime, date
-from decimal import Decimal
 
 
 # ============================================================================
@@ -22,10 +24,16 @@ from decimal import Decimal
 # ============================================================================
 
 def get_evaluacion_by_id(db: Session, evaluacion_id: int) -> Optional[Evaluacion]:
-    """Obtiene una evaluación por ID con sus resultados"""
-    return db.query(Evaluacion).filter(Evaluacion.id_evaluacion == evaluacion_id).first()
-
-
+    """Obtiene una evaluación por ID con todas sus relaciones"""
+    return db.query(Evaluacion)\
+        .options(
+            joinedload(Evaluacion.formulario),
+            joinedload(Evaluacion.evaluado),
+            joinedload(Evaluacion.evaluador),
+            joinedload(Evaluacion.resultados)
+        )\
+        .filter(Evaluacion.id_evaluacion == evaluacion_id)\
+        .first()
 def get_evaluaciones(
     db: Session,
     skip: int = 0,
@@ -309,7 +317,11 @@ def cancelar_evaluacion(db: Session, evaluacion_id: int, motivo: str = None) -> 
 
 def get_evaluaciones_pendientes(db: Session, evaluador_id: int) -> List[Evaluacion]:
     """Obtiene las evaluaciones pendientes de un evaluador"""
-    return db.query(Evaluacion).filter(
+    from sqlalchemy.orm import joinedload
+    
+    return db.query(Evaluacion).options(
+        joinedload(Evaluacion.formulario)  # ⭐ Cargar el formulario relacionado
+    ).filter(
         Evaluacion.id_evaluador == evaluador_id,
         Evaluacion.estado.in_(["Pendiente", "En Curso"])
     ).order_by(Evaluacion.fecha_fin).all()
@@ -327,6 +339,110 @@ def get_evaluaciones_por_periodo(db: Session, periodo: str) -> List[Evaluacion]:
     return db.query(Evaluacion).filter(
         Evaluacion.periodo == periodo
     ).all()
+
+
+def asignar_evaluacion_masiva(
+    db: Session,
+    request,  # AsignarEvaluacionMasivaRequest
+    current_user_id: int
+) -> dict:
+    """
+    Asigna un formulario a todos los usuarios de un rol específico
+    """
+    # Validar que el formulario existe
+    formulario = db.query(Formulario).filter(
+        Formulario.id_formulario == request.id_formulario
+    ).first()
+    
+    if not formulario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Formulario no encontrado"
+        )
+    
+    # Validar que el formulario esté activo
+    if formulario.estado != 'Activo':
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Solo se pueden asignar formularios activos"
+        )
+    
+    # Obtener todos los usuarios del rol especificado que estén activos
+    usuarios = db.query(Usuario).filter(
+        Usuario.id_rol == request.rol_id,
+        Usuario.estado == 'Activo'
+    ).all()
+    
+    if not usuarios:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No se encontraron usuarios activos con el rol ID {request.rol_id}"
+        )
+    
+    evaluaciones_creadas = []
+    evaluaciones_existentes = []
+    
+    fecha_inicio = date.today()
+    fecha_fin = fecha_inicio + timedelta(days=request.dias_plazo)
+    
+    # Crear una evaluación para cada usuario
+    for usuario in usuarios:
+        # Verificar si ya existe una evaluación pendiente o en curso para este usuario
+        evaluacion_existente = db.query(Evaluacion).filter(
+            Evaluacion.id_formulario == request.id_formulario,
+            Evaluacion.id_evaluado == usuario.id_usuario,
+            Evaluacion.periodo == request.periodo,
+            Evaluacion.estado.in_(['Pendiente', 'En Curso'])
+        ).first()
+        
+        if evaluacion_existente:
+            evaluaciones_existentes.append({
+                'usuario_id': usuario.id_usuario,
+                'nombre': f"{usuario.nombre} {usuario.apellido}",
+                'correo': usuario.correo,
+                'razon': 'Ya tiene una evaluación pendiente o en curso'
+            })
+            continue
+        
+        # Crear nueva evaluación
+        nueva_evaluacion = Evaluacion(
+            id_formulario=request.id_formulario,
+            id_evaluado=usuario.id_usuario,
+            id_evaluador=usuario.id_usuario,  # Para autoevaluación
+            tipo_evaluacion=request.tipo_evaluacion,
+            periodo=request.periodo,
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            estado='Pendiente'
+        )
+        
+        db.add(nueva_evaluacion)
+        evaluaciones_creadas.append({
+            'usuario_id': usuario.id_usuario,
+            'nombre': f"{usuario.nombre} {usuario.apellido}",
+            'correo': usuario.correo
+        })
+    
+    try:
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Se asignaron {len(evaluaciones_creadas)} evaluaciones exitosamente",
+            "total_usuarios": len(usuarios),
+            "evaluaciones_creadas": evaluaciones_creadas,
+            "evaluaciones_existentes": evaluaciones_existentes,
+            "formulario_nombre": formulario.nombre_formulario,
+            "periodo": request.periodo,
+            "fecha_inicio": str(fecha_inicio),
+            "fecha_fin": str(fecha_fin)
+        }
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error al asignar evaluaciones: {str(e)}"
+        )
 
 
 # ============================================================================
@@ -384,3 +500,135 @@ def update_resultado(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Error al actualizar el resultado"
         )
+def get_evaluaciones_asignadas(
+    db: Session, 
+    usuario_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    estado: Optional[str] = None,
+    periodo: Optional[str] = None
+) -> List[Evaluacion]:
+    """
+    Obtiene las evaluaciones creadas/asignadas por un usuario específico
+    Útil para RRHH, Managers y Directores para ver qué evaluaciones han asignado
+    """
+    query = db.query(Evaluacion).join(
+        Formulario, Evaluacion.id_formulario == Formulario.id_formulario
+    ).filter(
+        Formulario.creado_por == usuario_id
+    )
+    
+    # Aplicar filtros opcionales
+    if estado:
+        query = query.filter(Evaluacion.estado == estado)
+    
+    if periodo:
+        query = query.filter(Evaluacion.periodo == periodo)
+    
+    # Ordenar por fecha de creación descendente
+    query = query.order_by(Evaluacion.fecha_creacion.desc())
+    
+    return query.offset(skip).limit(limit).all()
+
+# ============================================================================
+# NUEVAS FUNCIONES PARA MANAGERS
+# ============================================================================
+
+def get_evaluaciones_equipo(
+    db: Session, 
+    manager_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    estado: Optional[str] = None,
+    periodo: Optional[str] = None,
+    tipo: Optional[str] = None
+) -> List[Evaluacion]:
+    """Obtiene las evaluaciones de los colaboradores directos de un manager"""
+    from sqlalchemy.orm import joinedload
+    from app.modules.users.models import Usuario
+    
+    colaboradores = db.query(Usuario.id_usuario).filter(
+        Usuario.manager_id == manager_id,
+        Usuario.estado == 'Activo'
+    ).all()
+    
+    colaboradores_ids = [c.id_usuario for c in colaboradores]
+    
+    if not colaboradores_ids:
+        return []
+    
+    query = db.query(Evaluacion).options(
+        joinedload(Evaluacion.formulario),
+        joinedload(Evaluacion.evaluado),
+        joinedload(Evaluacion.evaluador)
+    ).filter(
+        Evaluacion.id_evaluado.in_(colaboradores_ids)
+    )
+    
+    if estado:
+        query = query.filter(Evaluacion.estado == estado)
+    
+    if periodo:
+        query = query.filter(Evaluacion.periodo == periodo)
+        
+    if tipo:
+        query = query.filter(Evaluacion.tipo_evaluacion == tipo)
+    
+    query = query.order_by(Evaluacion.fecha_fin.asc())
+    
+    return query.offset(skip).limit(limit).all()
+
+
+def get_evaluaciones_pendientes_equipo(db: Session, manager_id: int) -> List[Evaluacion]:
+    """Obtiene SOLO las evaluaciones pendientes que el manager debe completar"""
+    from sqlalchemy.orm import joinedload
+    from app.modules.users.models import Usuario
+    
+    colaboradores = db.query(Usuario.id_usuario).filter(
+        Usuario.manager_id == manager_id,
+        Usuario.estado == 'Activo'
+    ).all()
+    
+    colaboradores_ids = [c.id_usuario for c in colaboradores]
+    
+    if not colaboradores_ids:
+        return []
+    
+    return db.query(Evaluacion).options(
+        joinedload(Evaluacion.formulario),
+        joinedload(Evaluacion.evaluado)
+    ).filter(
+        Evaluacion.id_evaluador == manager_id,
+        Evaluacion.id_evaluado.in_(colaboradores_ids),
+        Evaluacion.estado.in_(["Pendiente", "En Curso"])
+    ).order_by(Evaluacion.fecha_fin.asc()).all()
+
+
+def get_autoevaluaciones_equipo(db: Session, manager_id: int, estado: Optional[str] = None) -> List[Evaluacion]:
+    """Obtiene las autoevaluaciones de los colaboradores del manager"""
+    from sqlalchemy.orm import joinedload
+    from app.modules.users.models import Usuario
+    
+    colaboradores = db.query(Usuario.id_usuario).filter(
+        Usuario.manager_id == manager_id,
+        Usuario.estado == 'Activo'
+    ).all()
+    
+    colaboradores_ids = [c.id_usuario for c in colaboradores]
+    
+    if not colaboradores_ids:
+        return []
+    
+    query = db.query(Evaluacion).options(
+        joinedload(Evaluacion.formulario),
+        joinedload(Evaluacion.evaluado)
+    ).filter(
+        Evaluacion.id_evaluado.in_(colaboradores_ids),
+        Evaluacion.tipo_evaluacion == 'Autoevaluación',
+        Evaluacion.id_evaluador == Evaluacion.id_evaluado
+    )
+    
+    if estado:
+        query = query.filter(Evaluacion.estado == estado)
+    
+    return query.order_by(Evaluacion.fecha_fin.desc()).all()
